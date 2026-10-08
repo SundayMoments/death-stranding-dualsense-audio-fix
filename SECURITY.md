@@ -1,70 +1,74 @@
-# Security and release notes
+# Security
 
-## What the player DLL does
+## What the mod does
 
-`XAudio2_9.dll` is a user-installed proxy placed next to `ds.exe`. It forwards
-XAudio2 exports to the Windows system DLL using a path from `GetSystemDirectoryW`.
-It uses MinHook to intercept audio initialization in the process that loads it,
-tries shared mode for controller audio, and falls back to the original exclusive
-initialization if shared mode fails. It also patches a known controller-speaker
-instruction sequence in game memory after checking expected bytes.
+`XAudio2_9.dll` goes next to `ds.exe`, and the game loads it in place of the Windows
+XAudio2 DLL. It passes every XAudio2 call through to the real Windows DLL. While
+Death Stranding is running, it also:
 
-The player DLL has no source-level network client, updater, persistence installer,
-or code for injecting into another process. It only activates when the host process
-is `ds.exe`; loaded by any other process, it just forwards XAudio2 calls to the system
-DLL. Install it only in the supported game's directory. The hard-coded game offsets
-require compatibility testing after game updates. These statements describe the
-reviewed source; they are not a guarantee about every file with this filename.
+- Opens the DualSense speaker in shared mode instead of exclusive mode, so BB and
+  controller-speaker audio can reach it. If shared mode fails, the game's original
+  behavior is used.
+- Patches one instruction sequence in the game's memory so a new BB Voice Output
+  device takes effect right away. The original bytes are checked first; if they
+  don't match (for example after a game update), the patch is skipped.
 
-MinHook allocates executable memory, changes code-page permissions, and suspends
-and adjusts threads in the current process when installing hooks. The player DLL
-still needs these operations. The diagnostic injector and suspended-process launcher
-are separate developer tools and are not part of the player package.
+It does not:
 
-With logging disabled, the player DLL does not install diagnostic render-buffer,
-GetService, CoCreateInstance, or game-state tracing detours, and it writes no files.
-Logging can be explicitly enabled using `DS_DUALSENSE_AUDIO_FIX_LOG=1`. The routing
-hooks and instruction patch remain active. These defaults do not depend on the DLL's
-file name. Release builds omit the COFF symbol table; this repository's source is the
-reference for review.
+- Modify `ds.exe` or any other file on disk.
+- Connect to the internet, update itself, or run at startup.
+- Do anything except pass XAudio2 calls through when loaded by a program other
+  than `ds.exe`.
+- Write any files unless you turn on logging.
 
-## Antivirus review
+## Why antivirus may flag it
 
-The proxy and memory-hooking behavior can resemble techniques used by malware.
-This is a plausible reason for heuristic detections, not confirmation of any
-vendor's detection rationale. Do not assume all alerts are false positives.
+To do its job, the mod uses techniques that malware also uses: it has the same name
+as a Windows system DLL, it hooks Windows audio functions with
+[MinHook](https://github.com/TsudaKageyu/minhook), and it changes code in the running
+game's memory. Heuristic and machine-learning scanners often flag that combination
+with generic names such as `Wacatac.B!ml`, `MalwareX-gen`, or `Agent`.
 
-For a suspected false positive, retain the exact flagged DLL and archive. Record
-their SHA-256 values, product version, download location, detection names, and
-analysis dates. Ask each detecting vendor to review the actual flagged sample;
-rebuilding creates a different hash and does not clear the previous release.
+That is common for game mods, but don't assume every alert is a false positive. Only
+use a copy downloaded from the
+[Releases page](https://github.com/SundayMoments/death-stranding-dualsense-audio-fix/releases),
+and check it as described below. The full source is in this repository.
 
-- [Microsoft software-developer submission](https://www.microsoft.com/en-us/wdsi/filesubmission)
-- [Avast false-positive submission](https://www.avast.com/report-false-positive)
-- [VirusTotal guidance and vendor contacts](https://docs.virustotal.com/docs/false-positive)
+## Check your download
 
-Source access helps a vendor review the behavior. Link the tagged source for the
-flagged release along with its GitHub release page and build attestation. Logs written
-with logging enabled include audio endpoint names and IDs from that PC; review them
-before attaching them to a public issue.
+Each release lists the SHA-256 checksums of its files. To get the checksum of your
+copy, run this in PowerShell in the folder that contains the DLL:
 
-## Publishing a release
+```powershell
+Get-FileHash XAudio2_9.dll -Algorithm SHA256
+```
 
-1. Test controller-speaker enable/disable, a device change, and game restart with
-   logging off and on. Confirm fallback behavior on a system where shared mode fails.
-2. Push a `v<version>` tag matching the DLL version resource. CI builds from that
-   clean commit, records the compiler version, and attests build provenance.
-3. The release contains only the player DLL, its README, the project and MinHook
-   licenses, build metadata, and checksum file. Diagnostic tools stay in a separate
-   CI artifact.
-4. If a trusted publisher certificate is available, Authenticode-sign and timestamp
-   the final DLL. Update the manifest and checksum after signing. Version resources
-   identify the product but do not authenticate it. Signing does not guarantee that
-   antivirus products will consider the file clean.
-5. Obtain vendor review for flagged release files and retain submission IDs. Recheck
-   the exact hashes after vendors respond. Do not claim that source cleanup alone
-   cleared detections, or recommend disabling antivirus protection.
+It should match the checksum in the release notes. Release files are built by
+GitHub Actions directly from the tagged source. If you have the
+[GitHub CLI](https://cli.github.com/), you can confirm that:
 
-Build metadata and GitHub attestations (`gh attestation verify XAudio2_9.dll --repo
-<owner>/<repo>`) tie a release file to the commit and workflow run that built it.
-They do not prove reproducible builds; the CI toolchain currently updates over time.
+```powershell
+gh attestation verify XAudio2_9.dll --repo SundayMoments/death-stranding-dualsense-audio-fix
+```
+
+## If your antivirus flags it
+
+1. Check the checksum as described above.
+2. If it matches, report the file to your antivirus vendor as a false positive.
+   [Microsoft Defender](https://www.microsoft.com/en-us/wdsi/filesubmission) and
+   [Avast/AVG](https://www.avast.com/report-false-positive) accept submissions, and
+   VirusTotal keeps a [list of vendor contacts](https://docs.virustotal.com/docs/false-positive).
+3. You can also open an issue with the detection name and the file's checksum.
+
+Please don't turn off your antivirus to use the mod.
+
+## Logs
+
+Logging is off by default. If you turn it on (see the [README](README.md)), the log
+is written to the game folder and includes the names and IDs of your audio devices.
+Remove those before posting a log publicly.
+
+## Reporting a security problem
+
+Please report security problems privately from this repository's **Security** tab
+(**Report a vulnerability**) instead of opening a public issue.
