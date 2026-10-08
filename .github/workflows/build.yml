@@ -1,0 +1,215 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  windows-mingw:
+    name: Windows MinGW
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install MSYS2 MinGW
+        id: msys2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+
+      - name: Build
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          # setup-msys2 installs outside C:\msys64; make sure its g++ wins over
+          # the MinGW toolchain preinstalled on the runner image.
+          $toolchain = Join-Path $env:MSYS2_LOCATION "ucrt64\bin"
+          $env:Path = "$toolchain;$env:Path"
+          $gxx = (Get-Command g++ -ErrorAction Stop).Source
+          if (!$gxx.StartsWith($toolchain, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Expected MSYS2 UCRT64 g++ under $toolchain, found $gxx"
+          }
+          .\build.ps1 -IncludeDiagnostics
+
+      - name: Verify expected artifacts
+        shell: pwsh
+        run: |
+          $expected = @(
+            "outputs\XAudio2_9.dll",
+            "outputs\build-info.json",
+            "outputs\SHA256SUMS.txt",
+            "outputs\ds_wasapi_trace.dll",
+            "outputs\ds_dualsense_shared_fix.dll",
+            "outputs\ds_wasapi_trace_injector.exe",
+            "outputs\ds_dualsense_shared_fix_launcher.exe",
+            "outputs\ds_dualsense_audio_probe.exe"
+          )
+
+          foreach ($path in $expected) {
+            if (!(Test-Path -LiteralPath $path)) {
+              throw "Missing expected artifact: $path"
+            }
+          }
+
+          $buildInfo = Get-Content outputs\build-info.json -Raw | ConvertFrom-Json
+          $actualHash = (Get-FileHash outputs\XAudio2_9.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($buildInfo.sha256 -ne $actualHash -or $buildInfo.sourceDirty) {
+            throw "Proxy build provenance does not match a clean source checkout"
+          }
+          if ($buildInfo.sourceCommit -ne (git rev-parse HEAD)) {
+            throw "Proxy source revision does not match this checkout"
+          }
+          $version = (Get-Item outputs\XAudio2_9.dll).VersionInfo
+          if ($version.ProductName -ne "Death Stranding DualSense Audio Fix") {
+            throw "Missing proxy product metadata"
+          }
+          Write-Host "Compiler: $($buildInfo.compiler)"
+          Write-Host "XAudio2_9.dll $($version.ProductVersion) sha256=$actualHash"
+
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $expected = $env:TAG.Substring(1)
+          $version = (Get-Item outputs\XAudio2_9.dll).VersionInfo
+          if ($version.ProductVersion -ne $expected -or $version.FileVersion -ne $expected) {
+            throw "Tag $env:TAG does not match DLL version $($version.ProductVersion) / $($version.FileVersion)"
+          }
+
+      - name: Add license to player package
+        shell: pwsh
+        run: Copy-Item -LiteralPath LICENSE -Destination outputs\LICENSE.txt
+
+      - name: Upload player package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: death-stranding-dualsense-audio-fix-windows
+          if-no-files-found: error
+          path: |
+            outputs/XAudio2_9.dll
+            outputs/XAudio2_9_proxy_README.txt
+            outputs/build-info.json
+            outputs/SHA256SUMS.txt
+            outputs/LICENSE.txt
+            outputs/MinHook-LICENSE.txt
+
+      - name: Upload developer diagnostics separately
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: death-stranding-dualsense-audio-fix-developer-tools
+          if-no-files-found: error
+          path: |
+            outputs/ds_wasapi_trace.dll
+            outputs/ds_dualsense_shared_fix.dll
+            outputs/ds_wasapi_trace_injector.exe
+            outputs/ds_dualsense_shared_fix_launcher.exe
+            outputs/ds_dualsense_audio_probe.exe
+            outputs/ds_wasapi_trace_README.txt
+            outputs/ds_dualsense_shared_fix_README.txt
+            outputs/ds_dualsense_audio_probe_README.txt
+            outputs/MinHook-LICENSE.txt
+
+  release:
+    name: Publish release
+    needs: windows-mingw
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download player package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: death-stranding-dualsense-audio-fix-windows
+          path: package
+
+      - name: Package release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          zip_name="death-stranding-dualsense-audio-fix-${TAG}.zip"
+          mkdir dist
+          cp package/XAudio2_9.dll dist/
+          (cd package && zip -X -r "../dist/${zip_name}" .)
+          (cd dist && sha256sum XAudio2_9.dll "${zip_name}" > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/XAudio2_9.dll
+            dist/death-stranding-dualsense-audio-fix-*.zip
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          {
+            echo "Fixes DualSense/BB controller-speaker audio routing in Death Stranding Director's Cut on Windows."
+            echo
+            echo "## Install"
+            echo
+            echo 'Copy `XAudio2_9.dll` next to `ds.exe`, then launch the game normally.'
+            echo
+            echo "## Uninstall"
+            echo
+            echo 'Delete `XAudio2_9.dll`.'
+            echo
+            echo "See the [README](${repo_url}/blob/${TAG}/README.md) for optional logging and"
+            echo "[SECURITY.md](${repo_url}/blob/${TAG}/SECURITY.md) for what the DLL does and how antivirus detections are handled."
+            echo
+            echo "## Verify"
+            echo
+            echo '```text'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "Built by GitHub Actions from \`${GITHUB_SHA}\`. To check the build provenance:"
+            echo
+            echo '```text'
+            echo "gh attestation verify XAudio2_9.dll --repo ${GITHUB_REPOSITORY}"
+            echo '```'
+            echo
+            echo "Made by SundayMoments / SeanConnerX0. Donations: https://ko-fi.com/sundaymoments"
+          } > notes.md
+
+          prerelease=()
+          if [[ "$TAG" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+
+          gh release create "$TAG" dist/* \
+            --verify-tag \
+            --title "Death Stranding DualSense Audio Fix ${TAG}" \
+            --notes-file notes.md \
+            "${prerelease[@]}"

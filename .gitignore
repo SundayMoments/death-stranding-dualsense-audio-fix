@@ -1,0 +1,16 @@
+outputs/*.dll
+outputs/*.exe
+outputs/*.log
+outputs/build-info.json
+outputs/SHA256SUMS.txt
+work/*.exe
+*.codex_backup_*
+*.pdb
+*.obj
+*.o
+*.a
+*.lib
+*.exp
+*.ilk
+.vs/
+build/
